@@ -42,6 +42,7 @@
 #define MODE_IPOD 0x20
 #define MODE_ISM  0x40
 #define MODE_F4V  0x80
+#define MODE_HEIC 0x100
 
 typedef struct MOVIentry {
     uint64_t     pos;
@@ -235,6 +236,9 @@ typedef struct MOVMuxContext {
     int write_tmcd;
     MOVPrftBox write_prft;
     int empty_hdlr_name;
+
+    int64_t iloc_base_offset_pos;
+    int64_t iloc_extent_len_pos;
 } MOVMuxContext;
 
 #define FF_MOV_FLAG_RTP_HINT              (1 <<  0)

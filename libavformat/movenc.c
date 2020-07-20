@@ -2025,6 +2025,17 @@ static void find_compressor(char * compressor_name, int len, MOVTrack *track)
     }
 }
 
+static int mov_write_ccst_tag(AVIOContext *pb, MOVTrack *track)
+{
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "ccst");
+    avio_wb32(pb, 0);          /* version and flags */
+    avio_w8(pb, 0x84);         /* all_ref_pics_intra(1) | intra_pred_used(1) | max_ref_per_pic(4) | padding(2) */
+    avio_wb24(pb, 0);          /* reserved */
+    return update_size(pb, pos);
+}
+
 static int mov_write_video_tag(AVFormatContext *s, AVIOContext *pb, MOVMuxContext *mov, MOVTrack *track)
 {
     int64_t pos = avio_tell(pb);
@@ -2158,6 +2169,9 @@ static int mov_write_video_tag(AVFormatContext *s, AVIOContext *pb, MOVMuxContex
             mov_write_fiel_tag(pb, track, field_order);
     }
 
+    if (track->mode == MODE_HEIC && track->sample_count > 1)
+        mov_write_ccst_tag(pb, track);
+
     if (mov->flags & FF_MOV_FLAG_WRITE_GAMA) {
         if (track->mode == MODE_MOV)
             mov_write_gama_tag(s, pb, track, mov->gamma);
@@ -2165,7 +2179,7 @@ static int mov_write_video_tag(AVFormatContext *s, AVIOContext *pb, MOVMuxContex
             av_log(mov->fc, AV_LOG_WARNING, "Not writing 'gama' atom. Format is not MOV.\n");
     }
     if (mov->flags & FF_MOV_FLAG_WRITE_COLR) {
-        if (track->mode == MODE_MOV || track->mode == MODE_MP4)
+        if (track->mode == MODE_MOV || track->mode == MODE_MP4 || track->mode == MODE_HEIC)
             mov_write_colr_tag(pb, track, mov->flags & FF_MOV_FLAG_PREFER_ICC);
         else
             av_log(mov->fc, AV_LOG_WARNING, "Not writing 'colr' atom. Format is not MOV or MP4.\n");
@@ -2560,8 +2574,8 @@ static int mov_write_stbl_tag(AVFormatContext *s, AVIOContext *pb, MOVMuxContext
     if (track->mode == MODE_MOV && track->flags & MOV_TRACK_STPS)
         mov_write_stss_tag(pb, track, MOV_PARTIAL_SYNC_SAMPLE);
     if (track->par->codec_type == AVMEDIA_TYPE_VIDEO &&
+        track->mode != MODE_HEIC && // apple does not support heic with ctts box when b-frame existed
         track->flags & MOV_TRACK_CTTS && track->entry) {
-
         if ((ret = mov_write_ctts_tag(s, pb, track)) < 0)
             return ret;
     }
@@ -2706,8 +2720,13 @@ static int mov_write_hdlr_tag(AVFormatContext *s, AVIOContext *pb, MOVTrack *tra
     if (track) {
         hdlr = (track->mode == MODE_MOV) ? "mhlr" : "\0\0\0\0";
         if (track->par->codec_type == AVMEDIA_TYPE_VIDEO) {
-            hdlr_type = "vide";
-            descr     = "VideoHandler";
+            if (track->mode == MODE_HEIC) {
+                hdlr_type = "pict";
+                descr     = "HEIF/ImageSequence/PictureHandler";
+            } else {
+                hdlr_type = "vide";
+                descr     = "VideoHandler";
+            }
         } else if (track->par->codec_type == AVMEDIA_TYPE_AUDIO) {
             hdlr_type = "soun";
             descr     = "SoundHandler";
@@ -3743,6 +3762,139 @@ static int mov_write_mdta_ilst_tag(AVIOContext *pb, MOVMuxContext *mov,
     return update_size(pb, pos);
 }
 
+static int mov_write_pict_hdlr_tag(AVIOContext *pb, MOVMuxContext *mov,
+                                   AVFormatContext *s)
+{
+    avio_wb32(pb, 34);          /* size */
+    ffio_wfourcc(pb, "hdlr");
+    avio_wb32(pb, 0);
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "pict");
+    /* reserved1 */
+    avio_wb16(pb, 0);
+    /* reserved2 */
+    avio_wb32(pb, 0);
+    avio_wb32(pb, 0);
+    avio_wb32(pb, 0);
+    return 34;
+}
+static int mov_write_pitm_tag(AVIOContext *pb, MOVMuxContext *mov,
+                              AVFormatContext *s)
+{
+    avio_wb32(pb, 14);          /* size */
+    ffio_wfourcc(pb, "pitm");
+    avio_wb32(pb, 0);           /* version and flags */
+    avio_wb16(pb, 1);           /* item id */
+    return 14;
+}
+static int mov_write_infe_tag(AVIOContext *pb, MOVMuxContext *mov,
+                              AVFormatContext *s)
+{
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, 0);           /* size */
+    ffio_wfourcc(pb, "infe");
+    avio_w8(pb, 2);             /* version */
+    avio_wb24(pb, 0);           /* flags */
+    avio_wb16(pb, 1);           /* item id */
+    avio_wb16(pb, 0);           /* item protection index */
+    ffio_wfourcc(pb, "hvc1");
+    avio_w8(pb, 0);
+    return update_size(pb, pos);
+}
+static int mov_write_iinf_tag(AVIOContext *pb, MOVMuxContext *mov,
+                              AVFormatContext *s)
+{
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, 0);           /* size */
+    ffio_wfourcc(pb, "iinf");
+    avio_wb32(pb, 0);           /* version and flags */
+    avio_wb16(pb, 1);           /* item count */
+    mov_write_infe_tag(pb, mov, s);
+    return update_size(pb, pos);
+}
+static int mov_write_ispe_tag(AVIOContext *pb, MOVTrack *track)
+{
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "ispe");
+    avio_wb32(pb, 0);
+    avio_wb32(pb, track->par->width);
+    avio_wb32(pb, track->par->height);
+    return update_size(pb, pos);
+}
+static int mov_write_pixi_tag(AVIOContext *pb, MOVTrack *track)
+{
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "pixi");
+    avio_wb32(pb, 0);
+    avio_w8(pb, 3);
+    avio_w8(pb, 8);
+    avio_w8(pb, 8);
+    avio_w8(pb, 8);
+    return update_size(pb, pos);
+}
+static int mov_write_ipma_tag(AVIOContext *pb, MOVMuxContext *mov,
+                              AVFormatContext *s)
+{
+    int64_t pos = avio_tell(pb);
+    uint8_t prop;
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "ipma");
+    avio_wb32(pb, 0);
+    avio_wb32(pb, 1);           /* entry count */
+    avio_wb16(pb, 1);           /* item id */
+    avio_w8(pb, 3);             /* association count */
+    prop = (1 << 7) | 0x01;     /* essential bit | index */
+    avio_w8(pb, prop);
+    prop = (0 << 7) | 0x02;
+    avio_w8(pb, prop);
+    prop = (0 << 7) | 0x03;
+    avio_w8(pb, prop);
+    return update_size(pb, pos);
+}
+static int mov_write_ipco_tag(AVIOContext *pb, MOVMuxContext *mov,
+                              AVFormatContext *s)
+{
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "ipco");
+    mov_write_hvcc_tag(pb, &(mov->tracks[0]));
+    mov_write_ispe_tag(pb, &(mov->tracks[0]));
+    mov_write_pixi_tag(pb, &(mov->tracks[0]));
+    return update_size(pb, pos);
+}
+static int mov_write_iprp_tag(AVIOContext *pb, MOVMuxContext *mov,
+                              AVFormatContext *s)
+{
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "iprp");
+    mov_write_ipco_tag(pb, mov, s);
+    mov_write_ipma_tag(pb, mov, s);
+    return update_size(pb, pos);
+}
+static int mov_write_iloc_tag(AVIOContext *pb, MOVMuxContext *mov,
+                              AVFormatContext *s)
+{
+    int64_t pos = avio_tell(pb);
+    avio_wb32(pb, 0);
+    ffio_wfourcc(pb, "iloc");
+    avio_wb32(pb, 0);
+    avio_w8(pb, 0x44);      /* (offset_size<<4)|length_size */
+    avio_w8(pb, 0x40);      /* (base_offset_size<<4)|index_size */
+    avio_wb16(pb, 1);       /* entry count */
+    avio_wb16(pb, 1);       /* item id */
+    avio_wb16(pb, 0);       /* data reference index */
+    mov->iloc_base_offset_pos = avio_tell(pb);
+    avio_wb32(pb, 0);       /* base offset placeholder */
+    avio_wb16(pb, 1);
+    avio_wb32(pb, 0);       /* extent offset */
+    mov->iloc_extent_len_pos = avio_tell(pb);
+    avio_wb32(pb, 0);       /* extent length placeholder */
+    return update_size(pb, pos);
+}
+
 /* meta data tags */
 static int mov_write_meta_tag(AVIOContext *pb, MOVMuxContext *mov,
                               AVFormatContext *s)
@@ -3756,8 +3908,14 @@ static int mov_write_meta_tag(AVIOContext *pb, MOVMuxContext *mov,
         mov_write_mdta_hdlr_tag(pb, mov, s);
         mov_write_mdta_keys_tag(pb, mov, s);
         mov_write_mdta_ilst_tag(pb, mov, s);
-    }
-    else {
+    } else if (mov->mode == MODE_HEIC) {
+        mov_write_pict_hdlr_tag(pb, mov, s);
+        mov_write_dinf_tag(pb);
+        mov_write_pitm_tag(pb, mov, s);
+        mov_write_iloc_tag(pb, mov, s);
+        mov_write_iinf_tag(pb, mov, s);
+        mov_write_iprp_tag(pb, mov, s);
+    } else {
         /* iTunes metadata tag */
         mov_write_itunes_hdlr_tag(pb, mov, s);
         mov_write_ilst_tag(pb, mov, s);
@@ -3891,7 +4049,7 @@ static int mov_write_udta_tag(AVIOContext *pb, MOVMuxContext *mov,
         mov_write_string_metadata(s, pb_buf, "\251xyz", "location",    0);
         mov_write_string_metadata(s, pb_buf, "\251key", "keywords",    0);
         mov_write_raw_metadata_tag(s, pb_buf, "XMP_", "xmp");
-    } else {
+    } else if (mov->mode != MODE_HEIC) { // in Heic mode, meta tag should be placed in front
         /* iTunes meta data */
         mov_write_meta_tag(pb_buf, mov, s);
         mov_write_loci_tag(s, pb_buf);
@@ -4840,7 +4998,7 @@ static int mov_write_mdat_tag(AVIOContext *pb, MOVMuxContext *mov)
     ffio_wfourcc(pb, mov->mode == MODE_MOV ? "wide" : "free");
 
     mov->mdat_pos = avio_tell(pb);
-    avio_wb32(pb, 0); /* size placeholder*/
+    avio_wb32(pb, 0); /* size placeholder */
     ffio_wfourcc(pb, "mdat");
     return 0;
 }
@@ -4859,6 +5017,9 @@ static void mov_write_ftyp_tag_internal(AVIOContext *pb, AVFormatContext *s,
     } else if (mov->mode & MODE_3G2) {
         ffio_wfourcc(pb, has_h264 ? "3g2b"  : "3g2a");
         minor =     has_h264 ? 0x20000 : 0x10000;
+    } else if (mov->mode == MODE_HEIC) {
+        ffio_wfourcc(pb, "heic");
+        minor = 0;
     } else if (mov->mode == MODE_PSP)
         ffio_wfourcc(pb, "MSNV");
     else if (mov->mode == MODE_MP4 && mov->flags & FF_MOV_FLAG_FRAGMENT &&
@@ -4946,6 +5107,14 @@ static int mov_write_ftyp_tag(AVIOContext *pb, AVFormatContext *s)
 
     if (mov->mode == MODE_MP4)
         ffio_wfourcc(pb, "mp41");
+
+    if (mov->mode == MODE_HEIC) {
+        ffio_wfourcc(pb, "msf1");
+        ffio_wfourcc(pb, "heic");
+        ffio_wfourcc(pb, "hevc");
+        ffio_wfourcc(pb, "mif1");
+        ffio_wfourcc(pb, "iso8");
+    }
 
     if (mov->flags & FF_MOV_FLAG_DASH && mov->flags & FF_MOV_FLAG_GLOBAL_SIDX)
         ffio_wfourcc(pb, "dash");
@@ -6296,6 +6465,7 @@ static int mov_init(AVFormatContext *s)
         else if (!strcmp("ipod",s->oformat->name)) mov->mode = MODE_IPOD;
         else if (!strcmp("ismv",s->oformat->name)) mov->mode = MODE_ISM;
         else if (!strcmp("f4v", s->oformat->name)) mov->mode = MODE_F4V;
+        else if (!strcmp("heic",s->oformat->name)) mov->mode = MODE_HEIC;
     }
 
     if (mov->flags & FF_MOV_FLAG_DELAY_MOOV)
@@ -6495,7 +6665,9 @@ static int mov_init(AVFormatContext *s)
                     av_log(s, AV_LOG_WARNING, "Warning: some tools, like mp4split, assume a timescale of 10000000 for ISMV.\n");
             } else {
                 track->timescale = st->time_base.den;
-                while(track->timescale < 10000)
+                if (mov->mode == MODE_HEIC && track->timescale < MOV_TIMESCALE)
+                    track->timescale = MOV_TIMESCALE;
+                else while(track->timescale < 10000)
                     track->timescale *= 2;
             }
             if (st->codecpar->width > 65535 || st->codecpar->height > 65535) {
@@ -6643,7 +6815,8 @@ static int mov_write_header(AVFormatContext *s)
         if (st->codecpar->extradata_size) {
             if (st->codecpar->codec_id == AV_CODEC_ID_DVD_SUBTITLE)
                 mov_create_dvd_sub_decoder_specific_info(track, st);
-            else if (!TAG_IS_AVCI(track->tag) && st->codecpar->codec_id != AV_CODEC_ID_DNXHD) {
+            else if (mov->mode == MODE_HEIC ||
+                (!TAG_IS_AVCI(track->tag) && st->codecpar->codec_id != AV_CODEC_ID_DNXHD)) {
                 track->vos_len  = st->codecpar->extradata_size;
                 track->vos_data = av_malloc(track->vos_len + AV_INPUT_BUFFER_PADDING_SIZE);
                 if (!track->vos_data) {
@@ -6678,6 +6851,10 @@ static int mov_write_header(AVFormatContext *s)
         if ((ret = mov_write_identification(pb, s)) < 0)
             return ret;
     }
+
+    if (mov->mode == MODE_HEIC)
+        if ((ret = mov_write_meta_tag(pb, mov, s)) < 0)
+            return ret;
 
     if (mov->reserved_moov_size){
         mov->reserved_header_pos = avio_tell(pb);
@@ -6895,6 +7072,7 @@ static int mov_write_trailer(AVFormatContext *s)
 {
     MOVMuxContext *mov = s->priv_data;
     AVIOContext *pb = s->pb;
+    int nb_vid_samples = 0;
     int res = 0;
     int i;
     int64_t moov_pos;
@@ -6925,6 +7103,8 @@ static int mov_write_trailer(AVFormatContext *s)
             mov_write_subtitle_end_packet(s, i, trk->track_duration);
             trk->last_sample_is_subtitle_end = 1;
         }
+        if (trk->par->codec_type == AVMEDIA_TYPE_VIDEO)
+            nb_vid_samples = trk->sample_count;
     }
 
     // If there were no chapters when the header was written, but there
@@ -6953,6 +7133,14 @@ static int mov_write_trailer(AVFormatContext *s)
             avio_wb32(pb, 1);
             ffio_wfourcc(pb, "mdat");
             avio_wb64(pb, mov->mdat_size + 16);
+        }
+        if (mov->mode == MODE_HEIC) {
+            /* overwrite iloc placeholders */
+            avio_seek(pb, mov->iloc_base_offset_pos, SEEK_SET);
+            avio_wb32(pb, mov->mdat_pos + 8);
+            avio_seek(pb, mov->iloc_extent_len_pos, SEEK_SET);
+            avio_wb32(pb, mov->mdat_size);
+            if (nb_vid_samples == 1) return 0;
         }
         avio_seek(pb, mov->reserved_moov_size > 0 ? mov->reserved_header_pos : moov_pos, SEEK_SET);
 
@@ -7092,6 +7280,12 @@ static const AVCodecTag codec_f4v_tags[] = {
     { AV_CODEC_ID_H264,   MKTAG('a','v','c','1') },
     { AV_CODEC_ID_VP6A,   MKTAG('V','P','6','A') },
     { AV_CODEC_ID_VP6F,   MKTAG('V','P','6','F') },
+    { AV_CODEC_ID_NONE, 0 },
+};
+
+static const AVCodecTag codec_heic_tags[] = {
+    { AV_CODEC_ID_HEVC,   MKTAG('h','v','c','1') },
+    { AV_CODEC_ID_HEVC,   MKTAG('h','e','v','1') },
     { AV_CODEC_ID_NONE, 0 },
 };
 
@@ -7263,5 +7457,25 @@ AVOutputFormat ff_f4v_muxer = {
     .codec_tag         = (const AVCodecTag* const []){ codec_f4v_tags, 0 },
     .check_bitstream   = mov_check_bitstream,
     .priv_class        = &f4v_muxer_class,
+};
+#endif
+#if CONFIG_HEIC_MUXER
+MOV_CLASS(heic)
+AVOutputFormat ff_heic_muxer = {
+    .name              = "heic",
+    .long_name         = NULL_IF_CONFIG_SMALL("High Efficiency Image Format"),
+    .mime_type         = "image/heic",
+    .extensions        = "heic,heif",
+    .priv_data_size    = sizeof(MOVMuxContext),
+    .video_codec       = AV_CODEC_ID_HEVC,
+    .init              = mov_init,
+    .write_header      = mov_write_header,
+    .write_packet      = mov_write_packet,
+    .write_trailer     = mov_write_trailer,
+    .deinit            = mov_free,
+    .flags             = AVFMT_GLOBALHEADER | AVFMT_ALLOW_FLUSH,
+    .codec_tag         = (const AVCodecTag* const []){ codec_heic_tags, 0 },
+    .check_bitstream   = mov_check_bitstream,
+    .priv_class        = &heic_muxer_class,
 };
 #endif

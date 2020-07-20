@@ -268,6 +268,21 @@ enum AVPacketSideDataType {
     AV_PKT_DATA_PRFT,
 
     /**
+     * Tile info for image reconstruction
+     * @code
+     * u32le current_tile (current tile number in row major order) [0..nb_tiles-1]
+     * u32le nb_tiles
+     * u32le grid_rows (rows in the final image grid)
+     * u32le grid_cols (cols in the final image grid)
+     * u32le tile_width
+     * u32le tile_height
+     * u32le output_width  (cropped width  of the final image)
+     * u32le output_height (cropped height of the final image)
+     * @encode
+     */
+    AV_PKT_DATA_TILE_INFO,
+
+    /**
      * ICC profile data consisting of an opaque octet buffer following the
      * format described by ISO 15076-1.
      */
