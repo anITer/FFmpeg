@@ -44,3 +44,8 @@ GPL. Please refer to the LICENSE file for detailed information.
 Patches should be submitted to the ffmpeg-devel mailing list using
 `git format-patch` or `git send-email`. Github pull requests should be
 avoided because they are not part of our review process and will be ignored.
+
+## Modification
+
+Add heif format supported, with both muxer and demuxer for static as well as
+animated pictures, based on the great job accomplished by [Swaraj1998](https://github.com/Swaraj1998/FFmpeg).
